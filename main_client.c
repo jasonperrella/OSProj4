@@ -33,12 +33,15 @@ void* thread_main_recv(void* args)
   int n;
   memset(buffer, 0, 512);
   n = recv(sockfd, buffer, 512, 0);
+  printf("\nBytes:%d\n", n);
+  fflush(stdout);
   while (n > 0) {
+    printf("%s\n", buffer);
+    fflush(stdout);
     memset(buffer, 0, 512);
     n = recv(sockfd, buffer, 512, 0);
     if (n < 0) error("ERROR recv() failed");
 
-    printf("\n%s\n", buffer);
   }
 
   return NULL;
@@ -94,31 +97,40 @@ int main(int argc, char *argv[])
 
   printf("Try connecting to %s...\n", inet_ntoa(serv_addr.sin_addr));
 
-  int status = connect(sockfd, 
-      (struct sockaddr *) &serv_addr, slen);
+  int status = connect(sockfd, (struct sockaddr *) &serv_addr, slen);
   if (status < 0) error("ERROR connecting");
   
   printf("Successfully connected to %s...\n", inet_ntoa(serv_addr.sin_addr));
   struct sockaddr_in localAddress;
-  printf("Fail1\n");
+  //printf("Fail1\n");
   socklen_t addrLen = sizeof(localAddress);
-  printf("Fail2\n");
+  //printf("Fail2\n");
   memset(&localAddress, 0, addrLen);
-  printf("Fail3\n");
+  //printf("Fail3\n");
   localAddress.sin_family = AF_INET;
   localAddress.sin_addr.s_addr = INADDR_ANY;
   localAddress.sin_port = 0;  
 
-  bind(sockfd, (struct sockaddr *) &localAddress, addrLen);
-   getsockname(sockfd, (struct sockaddr*)&localAddress, &addrLen);
+  //bind(sockfd, (struct sockaddr *) &localAddress, addrLen);
+      printf("Gettting Sockect name\n");
+
+  if(getsockname(sockfd, (struct sockaddr*)&localAddress, &addrLen) < 0){
+        error("Error Getting Socket name");
+  }
+      printf("G0t Sockect name\n");
+
   char ip_address[INET_ADDRSTRLEN];
   inet_ntop(AF_INET, &(localAddress.sin_addr), ip_address, INET_ADDRSTRLEN);
+  printf("Local IP_ADDRESS: %s\n", ip_address);
 
   // Send the username and IP address to the server
   char send_data[512];
   snprintf(send_data, sizeof(send_data), "%s|%s\n", username, ip_address);
-  send(sockfd, send_data, strlen(send_data), 0);
-
+  if(send(sockfd, send_data, strlen(send_data), 0) < 0){
+    error("Failed to send data");
+  }else{
+    printf("%s\n", "Sent Data Cleint");
+  }
 
   pthread_t tid1;
   pthread_t tid2;

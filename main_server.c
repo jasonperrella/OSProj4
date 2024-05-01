@@ -1,144 +1,235 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
-#include <sys/types.h>
+#include <unistd.h>
+#include <sys/types.h> 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netdb.h> 
 #include <pthread.h>
+#include <time.h>
 
 #define PORT_NUM 10004
-
+pthread_mutex_t list_mutex = PTHREAD_MUTEX_INITIALIZER;
 void error(const char *msg)
 {
-  perror(msg);
-  exit(0);
+	perror(msg);
+	exit(1);
+}
+
+typedef struct _USR {
+	int clisockfd;		// socket file descriptor
+	char *username;		// user name
+	char ip_address[32];	// IPv4 address of user
+	struct _USR* next;	// for linked list queue
+} USR;
+
+USR *head = NULL;
+USR *tail = NULL;
+
+void print_users(){
+	USR *cur = head;
+	if (cur == NULL){
+		printf("NO ONE IN CHAT ROOM.\n");
+	}
+	else{
+		printf("CONNECTED USERS:\n");
+		while(cur != NULL){
+			printf("USER: %s(%s) %d\n", cur -> username, cur -> ip_address, cur -> clisockfd);
+			cur = cur -> next;
+		}
+	}
+}
+
+void broadcast_join(int fromfd, char* user_name, char* ip_address){
+	//char buffer[512];
+	//snprintf(buffer, sizeof(buffer), "%s (%s) has joined the chat!\n", user_name, ip_address);
+	//for (USR* cur = head; cur != NULL; cur = cur -> next){
+	USR* cur = head;
+	while (cur != NULL)
+	{
+		if(cur -> clisockfd != fromfd){
+			char buffer[512];
+			snprintf(buffer, sizeof(buffer), "%s (%s) has joined the chat!\n", user_name, ip_address);
+			printf("%s", buffer);
+			fflush(stdout);
+			long bytes_sent = send(cur -> clisockfd, buffer, sizeof(buffer), 0);
+			//printf("adpepf: %ld", bytes_sent);
+			if(bytes_sent != sizeof(buffer)){
+				error("ERROR send() failed");
+			} else{
+				printf("%s\n", "sent data");
+			}
+		}
+		cur = cur -> next;
+	}
+}
+
+void broadcast(int fromfd, char* message)
+{
+	// figure out sender address
+	struct sockaddr_in cliaddr;
+	socklen_t clen = sizeof(cliaddr);
+	if (getpeername(fromfd, (struct sockaddr*)&cliaddr, &clen) < 0) error("ERROR Unknown sender!");
+
+	// traverse through all connected clients
+	USR* cur = head;
+	char *username = NULL;
+	while (cur != NULL){
+		if(cur -> clisockfd == fromfd){
+			username = strdup(cur -> username);
+			break;
+		}
+		cur = cur -> next;
+	}
+
+	cur = head;
+	while (cur != NULL) {
+		// check if cur is not the one who sent the message
+		if (cur->clisockfd != fromfd) {
+			char buffer[512];
+
+			// prepare message
+			sprintf(buffer, "[%s(%s)]:%s\n", username, inet_ntoa(cliaddr.sin_addr), message);
+			//printf("%s",buffer);
+			fflush(stdout);
+			int nmsg = strlen(buffer);
+
+			// send!
+			int nsen = send(cur->clisockfd, buffer, nmsg, 0);
+			if (nsen != nmsg) error("ERROR send() failed");
+		}
+
+		cur = cur->next;
+	}
+}
+
+void add_tail(int newclisockfd, char* username, char ip_address[32])
+{
+	//printf("In add tail\n");
+	if (head == NULL) {
+		head = (USR*) malloc(sizeof(USR));
+		head->clisockfd = newclisockfd;
+		head->username = strdup(username); 
+		strncpy(head->ip_address, ip_address, 32); // Safely copy the IP address
+    	head->ip_address[31] = '\0'; // Ensure null-termination
+		head->next = NULL;
+		tail = head;
+	} else {
+		tail->next = (USR*) malloc(sizeof(USR));
+		tail->next->clisockfd = newclisockfd;
+		tail->next->username = strdup(username);
+		strncpy(tail->next->ip_address, ip_address, 32); // Safely copy the IP address
+    	tail->next->ip_address[31] = '\0';
+		tail->next->next = NULL;
+		tail = tail->next;
+	}
+	
+	//printf("BROADCASTING\n");	
+	//printf("FINISHED BROADCASTING\n");
+	print_users();
 }
 
 typedef struct _ThreadArgs {
-  int clisockfd;
+	int clisockfd;
 } ThreadArgs;
 
-void* thread_main_recv(void* args)
+void* thread_main(void* args)
 {
-  pthread_detach(pthread_self());
+	// make sure thread resources are deallocated upon return
+	pthread_detach(pthread_self());
 
-  int sockfd = ((ThreadArgs*) args)->clisockfd;
-  free(args);
+	// get socket descriptor from argument
+	int clisockfd = ((ThreadArgs*) args)->clisockfd;
+	free(args);
 
-  // keep receiving and displaying message from server
-  char buffer[512];
-  int n;
-  memset(buffer, 0, 512);
-  n = recv(sockfd, buffer, 512, 0);
-  while (n > 0) {
-    memset(buffer, 0, 512);
-    n = recv(sockfd, buffer, 512, 0);
-    if (n < 0) error("ERROR recv() failed");
+	//-------------------------------
+	// Now, we receive/send messages
+	char buffer[256];
+	int nsen, nrcv;
 
-    printf("\n%s\n", buffer);
-  }
+	nrcv = recv(clisockfd, buffer, 255, 0);
+	if (nrcv < 0) error("ERROR recv() failed");
 
-  return NULL;
-}
+	while (nrcv > 0) {
+		// we send the message to everyone except the sender
+		broadcast(clisockfd, buffer);
 
-void* thread_main_send(void* args)
-{
-  pthread_detach(pthread_self());
+		nrcv = recv(clisockfd, buffer, 255, 0);
+		if (nrcv < 0) error("ERROR recv() failed");
+	}
 
-  int sockfd = ((ThreadArgs*) args)->clisockfd;
-  free(args);
+	close(clisockfd);
+	//-------------------------------
 
-  // keep sending messages to the server
-  char buffer[256];
-  int n;
-
-  while (1) {
-    // You will need a bit of control on your terminal
-    // console or GUI to have a nice input window.
-    //printf("\nPlease enter the message: ");
-    memset(buffer, 0, 256);
-    fgets(buffer, 255, stdin);
-    
-    if (strlen(buffer) == 1) buffer[0] = '\0';
-
-    n = send(sockfd, buffer, strlen(buffer), 0);
-    if (n < 0) error("ERROR writing to socket");
-
-    if (n == 0) break; // we stop transmission when user type empty string
-  }
-
-  return NULL;
+	return NULL;
 }
 
 int main(int argc, char *argv[])
 {
-  if (argc < 2) error("Please specify hostname");
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0) error("ERROR opening socket");
 
-  int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (sockfd < 0) error("ERROR opening socket");
+	struct sockaddr_in serv_addr;
+	socklen_t slen = sizeof(serv_addr);
+	memset((char*) &serv_addr, 0, sizeof(serv_addr));
+	serv_addr.sin_family = AF_INET;
+	serv_addr.sin_addr.s_addr = INADDR_ANY;	
+	//serv_addr.sin_addr.s_addr = inet_addr("192.168.1.171");	
+	serv_addr.sin_port = htons(PORT_NUM);
 
-  
-  char username[256];
-  printf("Enter your username: ");
-  fgets(username, sizeof(username), stdin);
+	int status = bind(sockfd, 
+			(struct sockaddr*) &serv_addr, slen);
+	if (status < 0) error("ERROR on binding");
 
-  struct sockaddr_in serv_addr;
-  socklen_t slen = sizeof(serv_addr);
-  memset((char*) &serv_addr, 0, sizeof(serv_addr));
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_addr.s_addr = inet_addr(argv[1]);
-  serv_addr.sin_port = htons(PORT_NUM);
+	listen(sockfd, 5); // maximum number of connections = 5
 
-  printf("Try connecting to %s...\n", inet_ntoa(serv_addr.sin_addr));
+	while(1) {
+		//printf("At the top\n");
 
-  int status = connect(sockfd, 
-      (struct sockaddr *) &serv_addr, slen);
-  if (status < 0) error("ERROR connecting");
-  
-  printf("Successfully connected to %s...\n", inet_ntoa(serv_addr.sin_addr));
-  struct sockaddr_in localAddress;
-  printf("Fail1\n");
-  socklen_t addrLen = sizeof(localAddress);
-  printf("Fail2\n");
-  memset(&localAddress, 0, addrLen);
-  printf("Fail3\n");
-  localAddress.sin_family = AF_INET;
-  localAddress.sin_addr.s_addr = INADDR_ANY;
-  localAddress.sin_port = 0;  
+		struct sockaddr_in cli_addr;
+		socklen_t clen = sizeof(cli_addr);
+		int newsockfd = accept(sockfd, 
+			(struct sockaddr *) &cli_addr, &clen);
+		if (newsockfd < 0) error("ERROR on accept");
+		//Get the username from the client
+		char username_ip[256];
+		int nrecv = recv(newsockfd, username_ip, sizeof(username_ip) - 1, 0);
+		if(nrecv < 0) error("ERROR recv() failed");
+		username_ip[nrecv] = '\0';
+		//get the username and client IP////
+		int i = 0;
+		int j = 0;
+		while(username_ip[i] != '\0'){
+			if(username_ip[i] != '\n'){
+				username_ip[j++] = username_ip[i];
+			}
+			i++;
+		}
+		username_ip[j] = '\0';
+		char* tok = strtok(username_ip, "|");
+		char* username_ip_sep[2];
+		int pos = 0;
+		while(tok != NULL){
+			printf("%s\n", tok);
+			username_ip_sep[pos] = tok;
+			tok = strtok(NULL, "|");
+			pos++;
+		}
 
-  bind(sockfd, (struct sockaddr *) &localAddress, addrLen);
-   getsockname(sockfd, (struct sockaddr*)&localAddress, &addrLen);
-  char ip_address[INET_ADDRSTRLEN];
-  inet_ntop(AF_INET, &(localAddress.sin_addr), ip_address, INET_ADDRSTRLEN);
+		add_tail(newsockfd, username_ip_sep[0], username_ip_sep[1]); // add this new client to the client list
+		broadcast_join(newsockfd, username_ip_sep[0], username_ip_sep[1]); 
 
-  // Send the username and IP address to the server
-  char send_data[512];
-  snprintf(send_data, sizeof(send_data), "%s|%s\n", username, ip_address);
-  send(sockfd, send_data, strlen(send_data), 0);
+		// prepare ThreadArgs structure to pass client socket
+		ThreadArgs* args = (ThreadArgs*) malloc(sizeof(ThreadArgs));
+		if (args == NULL) error("ERROR creating thread argument");
+		
+		args->clisockfd = newsockfd;
 
+		pthread_t tid;
+		if (pthread_create(&tid, NULL, thread_main, (void*) args) != 0) error("ERROR creating a new thread");
+	}
 
-  pthread_t tid1;
-  pthread_t tid2;
-
-  ThreadArgs* args;
-
-  args = (ThreadArgs*) malloc(sizeof(ThreadArgs));
-  args->clisockfd = sockfd;
-  pthread_create(&tid1, NULL, thread_main_send, (void*) args);
-
-  args = (ThreadArgs*) malloc(sizeof(ThreadArgs));
-  args->clisockfd = sockfd;
-  pthread_create(&tid2, NULL, thread_main_recv, (void*) args);
-
-  // parent will wait for sender to finish (= user stop sending message and disconnect from server)
-  pthread_join(tid1, NULL);
-
-  close(sockfd);
-
-  return 0;
+	return 0; 
 }
-
 
